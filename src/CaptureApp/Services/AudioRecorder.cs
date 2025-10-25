@@ -340,27 +340,165 @@ public sealed class AudioRecorder : IDisposable
     {
         await Task.Run(() =>
         {
+            // Check if files exist and have content
+            var loopbackInfo = new FileInfo(loopbackPath);
+            var microphoneInfo = new FileInfo(microphonePath);
+            
+            if (!loopbackInfo.Exists || loopbackInfo.Length < 100)
+            {
+                Status?.Invoke(this, $"WARNING: Loopback file is empty or too small ({loopbackInfo.Length} bytes). No system audio was captured.");
+            }
+            
+            if (!microphoneInfo.Exists || microphoneInfo.Length < 100)
+            {
+                Status?.Invoke(this, $"WARNING: Microphone file is empty or too small ({microphoneInfo.Length} bytes). No microphone audio was captured.");
+            }
+            
+            // If both files are empty, create a minimal valid stereo file
+            if (loopbackInfo.Length < 100 && microphoneInfo.Length < 100)
+            {
+                Status?.Invoke(this, "Both audio sources are empty. Creating silent audio file...");
+                CreateSilentStereoFile(outputPath, 1000); // 1 second of silence
+                return;
+            }
+            
             using var loopbackReader = new AudioFileReader(loopbackPath);
             using var microphoneReader = new AudioFileReader(microphonePath);
             
-            // Mix both sources
-            var mixer = new MixingSampleProvider(new[] { loopbackReader, microphoneReader })
+            // Check if readers have valid data
+            if (loopbackReader.Length == 0 && microphoneReader.Length == 0)
             {
-                ReadFully = true
-            };
+                Status?.Invoke(this, "No audio data in either file. Creating silent audio...");
+                CreateSilentStereoFile(outputPath, 1000);
+                return;
+            }
             
-            // Convert to mono 16kHz 16-bit
-            var resampled = new WdlResamplingSampleProvider(mixer, 16000);
-            var mono = resampled.WaveFormat.Channels > 1 
-                ? new StereoToMonoSampleProvider(resampled) 
-                : (ISampleProvider)resampled;
-            var wave16 = new SampleToWaveProvider16(mono);
+            // Convert both to mono if needed, or create silence if empty
+            ISampleProvider loopbackMono;
+            ISampleProvider microphoneMono;
+            
+            if (loopbackReader.Length == 0 || loopbackInfo.Length < 100)
+            {
+                Status?.Invoke(this, "Using silence for loopback channel (no system audio)");
+                loopbackMono = new SilenceProvider(WaveFormat.CreateIeeeFloatWaveFormat(16000, 1));
+            }
+            else
+            {
+                loopbackMono = loopbackReader.WaveFormat.Channels > 1 
+                    ? new StereoToMonoSampleProvider(loopbackReader) 
+                    : (ISampleProvider)loopbackReader;
+            }
+            
+            if (microphoneReader.Length == 0 || microphoneInfo.Length < 100)
+            {
+                Status?.Invoke(this, "Using silence for microphone channel (no microphone audio)");
+                microphoneMono = new SilenceProvider(WaveFormat.CreateIeeeFloatWaveFormat(16000, 1));
+            }
+            else
+            {
+                microphoneMono = microphoneReader.WaveFormat.Channels > 1 
+                    ? new StereoToMonoSampleProvider(microphoneReader) 
+                    : (ISampleProvider)microphoneReader;
+            }
+            
+            // Resample both to same rate if needed
+            var loopbackResampled = loopbackMono.WaveFormat.SampleRate != 16000
+                ? new WdlResamplingSampleProvider(loopbackMono, 16000)
+                : loopbackMono;
+                
+            var microphoneResampled = microphoneMono.WaveFormat.SampleRate != 16000
+                ? new WdlResamplingSampleProvider(microphoneMono, 16000)
+                : microphoneMono;
+            
+            // Combine into stereo: loopback = left channel, microphone = right channel
+            var stereoProvider = new StereoSampleProvider(loopbackResampled, microphoneResampled);
+            
+            // Convert to 16-bit WAV
+            var wave16 = new SampleToWaveProvider16(stereoProvider);
             
             // Write to output file
             WaveFileWriter.CreateWaveFile(outputPath, wave16);
             
-            Status?.Invoke(this, $"Merged {new FileInfo(outputPath).Length:N0} bytes");
+            Status?.Invoke(this, $"Merged stereo file: {new FileInfo(outputPath).Length:N0} bytes (Loopback=Left, Mic=Right)");
         });
+    }
+    
+    private void CreateSilentStereoFile(string outputPath, int durationMs)
+    {
+        var format = new WaveFormat(16000, 16, 2); // 16kHz, 16-bit, stereo
+        using var writer = new WaveFileWriter(outputPath, format);
+        
+        var samples = (int)(16000 * 2 * (durationMs / 1000.0)); // stereo = 2 channels
+        var buffer = new byte[samples * 2]; // 16-bit = 2 bytes per sample
+        Array.Clear(buffer, 0, buffer.Length);
+        
+        writer.Write(buffer, 0, buffer.Length);
+    }
+    
+    // Silence provider for empty channels
+    private class SilenceProvider : ISampleProvider
+    {
+        private readonly WaveFormat _waveFormat;
+        private long _position;
+        
+        public SilenceProvider(WaveFormat waveFormat)
+        {
+            _waveFormat = waveFormat;
+        }
+        
+        public WaveFormat WaveFormat => _waveFormat;
+        
+        public int Read(float[] buffer, int offset, int count)
+        {
+            // Match the length of the other channel by providing silence
+            // Return 0 to signal end of stream after some reasonable length
+            if (_position > _waveFormat.SampleRate * 60) // Max 60 seconds of silence
+                return 0;
+                
+            Array.Clear(buffer, offset, count);
+            _position += count;
+            return count;
+        }
+    }
+
+    // Helper class to combine two mono sources into stereo
+    private class StereoSampleProvider : ISampleProvider
+    {
+        private readonly ISampleProvider _leftChannel;
+        private readonly ISampleProvider _rightChannel;
+        private readonly WaveFormat _waveFormat;
+
+        public StereoSampleProvider(ISampleProvider leftChannel, ISampleProvider rightChannel)
+        {
+            if (leftChannel.WaveFormat.SampleRate != rightChannel.WaveFormat.SampleRate)
+                throw new ArgumentException("Sample rates must match");
+            
+            _leftChannel = leftChannel;
+            _rightChannel = rightChannel;
+            _waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(leftChannel.WaveFormat.SampleRate, 2);
+        }
+
+        public WaveFormat WaveFormat => _waveFormat;
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            var samplesPerChannel = count / 2;
+            var leftBuffer = new float[samplesPerChannel];
+            var rightBuffer = new float[samplesPerChannel];
+            
+            var leftRead = _leftChannel.Read(leftBuffer, 0, samplesPerChannel);
+            var rightRead = _rightChannel.Read(rightBuffer, 0, samplesPerChannel);
+            
+            var samplesToRead = Math.Min(leftRead, rightRead);
+            
+            for (int i = 0; i < samplesToRead; i++)
+            {
+                buffer[offset + i * 2] = leftBuffer[i];      // Left channel
+                buffer[offset + i * 2 + 1] = rightBuffer[i]; // Right channel
+            }
+            
+            return samplesToRead * 2;
+        }
     }
 
     public void Dispose()

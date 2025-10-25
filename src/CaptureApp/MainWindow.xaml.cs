@@ -7,6 +7,7 @@ using System.Windows;
 using CaptureApp.Models;
 using CaptureApp.Services;
 using NAudio.Wave;
+using Microsoft.Extensions.Configuration;
 
 namespace CaptureApp;
 
@@ -18,10 +19,29 @@ public partial class MainWindow : Window
     private string? _lastRecordingPath;
     private IWavePlayer? _waveOutDevice;
     private AudioFileReader? _audioFileReader;
+    private readonly IConfiguration _configuration;
+    private readonly string _whisperExecutablePath;
+    private readonly string _whisperModel;
 
     public MainWindow()
     {
         InitializeComponent();
+
+        // Load configuration
+        _configuration = new ConfigurationBuilder()
+            .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+            .Build();
+
+        // Read Whisper settings from configuration
+        _whisperExecutablePath = _configuration["Whisper:ExecutablePath"] ?? "whisper/faster-whisper-xxl.exe";
+        _whisperModel = _configuration["Whisper:Model"] ?? "medium";
+
+        // Resolve relative path to absolute
+        if (!Path.IsPathRooted(_whisperExecutablePath))
+        {
+            _whisperExecutablePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, _whisperExecutablePath);
+        }
 
         LanguageComboBox.ItemsSource = WhisperLanguageCatalog.Languages;
         LanguageComboBox.SelectedItem = WhisperLanguageCatalog.Languages.FirstOrDefault(l => l.Code == "en")
@@ -32,6 +52,17 @@ public partial class MainWindow : Window
 
         var defaultTranscripts = Path.Combine(_recordingsDirectory, "Transcripts");
         WhisperOutputTextBox.Text = defaultTranscripts;
+
+        // Log Whisper configuration
+        if (File.Exists(_whisperExecutablePath))
+        {
+            AppendLog($"Whisper executable: {_whisperExecutablePath}");
+            AppendLog($"Whisper model: {_whisperModel}");
+        }
+        else
+        {
+            AppendLog($"WARNING: Whisper executable not found at: {_whisperExecutablePath}");
+        }
 
         // Log available audio devices on startup
         AppendLog("Checking available audio devices...");
@@ -192,15 +223,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        var executable = WhisperExecutableTextBox.Text;
-        var model = WhisperModelTextBox.Text;
         var outputDirectory = WhisperOutputTextBox.Text;
         var extraArgs = WhisperArgsTextBox.Text;
         var language = (LanguageOption?)LanguageComboBox.SelectedItem ?? WhisperLanguageCatalog.Languages.First();
 
-        if (string.IsNullOrWhiteSpace(executable) || string.IsNullOrWhiteSpace(model))
+        if (!File.Exists(_whisperExecutablePath))
         {
-            UpdateStatus("Provide both Whisper executable and model paths.");
+            UpdateStatus($"Whisper executable not found: {_whisperExecutablePath}");
+            AppendLog("Please check the ExecutablePath in appsettings.json");
             return;
         }
 
@@ -213,8 +243,8 @@ public partial class MainWindow : Window
             _transcriptionCts = new CancellationTokenSource();
             var options = new WhisperOptions
             {
-                ExecutablePath = executable,
-                ModelPath = model,
+                ExecutablePath = _whisperExecutablePath,
+                ModelPath = _whisperModel,
                 OutputDirectory = string.IsNullOrWhiteSpace(outputDirectory)
                     ? Path.Combine(_recordingsDirectory, "Transcripts")
                     : outputDirectory,

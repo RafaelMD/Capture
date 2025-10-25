@@ -29,25 +29,17 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="120" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <TextBlock Text="Executable" Grid.Row="0" Grid.Column="0" Margin="0 0 12 8" VerticalAlignment="Center" />
-                <TextBox x:Name="WhisperExecutableTextBox" Grid.Row="0" Grid.Column="1" Margin="0 0 0 8" />
+                <TextBlock Text="Output Folder" Grid.Row="0" Grid.Column="0" Margin="0 0 12 8" VerticalAlignment="Center" />
+                <TextBox x:Name="WhisperOutputTextBox" Grid.Row="0" Grid.Column="1" Margin="0 0 0 8" />
 
-                <TextBlock Text="Model" Grid.Row="1" Grid.Column="0" Margin="0 0 12 8" VerticalAlignment="Center" />
-                <TextBox x:Name="WhisperModelTextBox" Grid.Row="1" Grid.Column="1" Margin="0 0 0 8" />
-
-                <TextBlock Text="Output Folder" Grid.Row="2" Grid.Column="0" Margin="0 0 12 8" VerticalAlignment="Center" />
-                <TextBox x:Name="WhisperOutputTextBox" Grid.Row="2" Grid.Column="1" Margin="0 0 0 8" />
-
-                <TextBlock Text="Extra Args" Grid.Row="3" Grid.Column="0" Margin="0 0 12 0" VerticalAlignment="Center" />
-                <TextBox x:Name="WhisperArgsTextBox" Grid.Row="3" Grid.Column="1" Margin="0" />
+                <TextBlock Text="Extra Args" Grid.Row="1" Grid.Column="0" Margin="0 0 12 0" VerticalAlignment="Center" />
+                <TextBox x:Name="WhisperArgsTextBox" Grid.Row="1" Grid.Column="1" Margin="0" />
             </Grid>
         </GroupBox>
 

@@ -42,15 +42,8 @@ public sealed class WhisperTranscriber
             throw new FileNotFoundException("Whisper executable not found.", _options.ExecutablePath);
         }
 
-        if (string.IsNullOrWhiteSpace(_options.ModelPath))
-        {
-            throw new InvalidOperationException("Whisper model path is not configured.");
-        }
-
-        if (!File.Exists(_options.ModelPath))
-        {
-            throw new FileNotFoundException("Whisper model not found.", _options.ModelPath);
-        }
+        // Model path is now optional - defaults to "medium" if not specified
+        // If specified, it should be a model name like "tiny", "base", "small", "medium", "large"
 
         var outputDirectory = string.IsNullOrWhiteSpace(_options.OutputDirectory)
             ? Path.GetDirectoryName(audioFile) ?? Environment.CurrentDirectory
@@ -131,18 +124,31 @@ public sealed class WhisperTranscriber
     private string BuildArguments(string audioFile, string languageCode, string outputPrefix)
     {
         var builder = new StringBuilder();
-        builder.Append(" -m \"");
-        builder.Append(_options.ModelPath);
-        builder.Append("\"");
-        builder.Append(" -l ");
-        builder.Append(languageCode);
-        builder.Append(" -f \"");
+        
+        // Audio file path (quoted)
+        builder.Append('"');
         builder.Append(audioFile);
-        builder.Append("\"");
-        builder.Append(" -otxt");
-        builder.Append(" -of \"");
-        builder.Append(outputPrefix);
-        builder.Append("\"");
+        builder.Append('"');
+        
+        // Language parameter
+        builder.Append(" --language ");
+        builder.Append(languageCode);
+        
+        // Model parameter (use model name from path or default to medium)
+        var modelName = !string.IsNullOrWhiteSpace(_options.ModelPath) 
+            ? Path.GetFileNameWithoutExtension(_options.ModelPath) 
+            : "medium";
+        builder.Append(" --model ");
+        builder.Append(modelName);
+        
+        // Output directory
+        var outputDir = Path.GetDirectoryName(outputPrefix);
+        if (!string.IsNullOrWhiteSpace(outputDir))
+        {
+            builder.Append(" --output_dir \"");
+            builder.Append(outputDir);
+            builder.Append('"');
+        }
 
         if (!string.IsNullOrWhiteSpace(_options.AdditionalArguments))
         {
