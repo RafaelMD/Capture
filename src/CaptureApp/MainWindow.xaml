@@ -1,7 +1,7 @@
 <Window x:Class="CaptureApp.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Capture" Height="520" Width="760" MinWidth="640" MinHeight="480"
+        Title="Audio Capture &amp; Transcription" Height="520" Width="760" MinWidth="640" MinHeight="480"
         Closing="OnClosing">
     <Grid Margin="16">
         <Grid.RowDefinitions>
@@ -17,9 +17,10 @@
                 <ComboBox x:Name="LanguageComboBox" DisplayMemberPath="DisplayName" SelectedValuePath="Code" />
             </StackPanel>
             <StackPanel Margin="24 0 0 0" VerticalAlignment="Bottom" Orientation="Horizontal" HorizontalAlignment="Left">
-                <Button x:Name="RecordButton" Width="100" Height="36" Margin="0 0 12 0" Click="OnRecordClicked">Record</Button>
-                <Button x:Name="StopButton" Width="100" Height="36" Margin="0 0 12 0" Click="OnStopClicked" IsEnabled="False">Stop</Button>
-                <Button x:Name="TranscribeButton" Width="120" Height="36" Click="OnTranscribeClicked" IsEnabled="False">Transcribe</Button>
+                <Button x:Name="RecordButton" Width="100" Height="36" Margin="0 0 12 0" Click="OnRecordClicked" IsDefault="False" Focusable="False">Record</Button>
+                <Button x:Name="StopButton" Width="100" Height="36" Margin="0 0 12 0" Click="OnStopClicked" IsEnabled="False" IsDefault="False">Stop</Button>
+                <Button x:Name="PlayButton" Width="100" Height="36" Margin="0 0 12 0" Click="OnPlayClicked" IsEnabled="False" IsDefault="False">Play</Button>
+                <Button x:Name="TranscribeButton" Width="120" Height="36" Click="OnTranscribeClicked" IsEnabled="False" IsDefault="False">Transcribe</Button>
             </StackPanel>
         </StackPanel>
 

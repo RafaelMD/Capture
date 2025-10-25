@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using CaptureApp.Models;
 using CaptureApp.Services;
+using NAudio.Wave;
 
 namespace CaptureApp;
 
@@ -15,6 +16,8 @@ public partial class MainWindow : Window
     private readonly string _recordingsDirectory;
     private CancellationTokenSource? _transcriptionCts;
     private string? _lastRecordingPath;
+    private IWavePlayer? _waveOutDevice;
+    private AudioFileReader? _audioFileReader;
 
     public MainWindow()
     {
@@ -30,6 +33,10 @@ public partial class MainWindow : Window
         var defaultTranscripts = Path.Combine(_recordingsDirectory, "Transcripts");
         WhisperOutputTextBox.Text = defaultTranscripts;
 
+        // Log available audio devices on startup
+        AppendLog("Checking available audio devices...");
+        AppendLog(AudioRecorder.GetAvailableDevicesInfo());
+
         _recorder.Status += (_, message) => Dispatcher.Invoke(() => AppendLog(message));
         _recorder.RecordingStopped += (_, path) => Dispatcher.Invoke(() =>
         {
@@ -38,6 +45,7 @@ public partial class MainWindow : Window
             UpdateStatus("Recording stopped.");
             RecordButton.IsEnabled = true;
             StopButton.IsEnabled = false;
+            PlayButton.IsEnabled = File.Exists(path);
             TranscribeButton.IsEnabled = File.Exists(path);
         });
         _recorder.RecordingFailed += (_, ex) => Dispatcher.Invoke(() =>
@@ -102,8 +110,11 @@ public partial class MainWindow : Window
     {
         try
         {
+            UpdateStatus("Stopping recording...");
+            AppendLog("Stop button clicked.");
             StopButton.IsEnabled = false;
             await _recorder.StopRecordingAsync();
+            AppendLog("Stop recording completed.");
         }
         catch (Exception ex)
         {
@@ -112,8 +123,65 @@ public partial class MainWindow : Window
                 UpdateStatus($"Failed to stop recording: {ex.Message}");
                 AppendLog(ex.ToString());
                 RecordButton.IsEnabled = true;
+                StopButton.IsEnabled = false;
             });
         }
+    }
+
+    private void OnPlayClicked(object sender, RoutedEventArgs e)
+    {
+        // Toggle playback
+        if (_waveOutDevice?.PlaybackState == PlaybackState.Playing)
+        {
+            StopPlayback();
+            UpdateStatus("Playback stopped.");
+            return;
+        }
+
+        if (_lastRecordingPath is null || !File.Exists(_lastRecordingPath))
+        {
+            UpdateStatus("No recording available to play.");
+            return;
+        }
+
+        try
+        {
+            // Stop any existing playback
+            StopPlayback();
+
+            _audioFileReader = new AudioFileReader(_lastRecordingPath);
+            _waveOutDevice = new WaveOutEvent();
+            _waveOutDevice.Init(_audioFileReader);
+            _waveOutDevice.PlaybackStopped += (s, args) =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    UpdateStatus("Playback finished.");
+                    PlayButton.Content = "Play";
+                    StopPlayback();
+                });
+            };
+
+            _waveOutDevice.Play();
+            PlayButton.Content = "Stop";
+            UpdateStatus($"Playing: {Path.GetFileName(_lastRecordingPath)}");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Failed to play recording: {ex.Message}");
+            AppendLog(ex.ToString());
+            StopPlayback();
+        }
+    }
+
+    private void StopPlayback()
+    {
+        _waveOutDevice?.Stop();
+        _waveOutDevice?.Dispose();
+        _waveOutDevice = null;
+        _audioFileReader?.Dispose();
+        _audioFileReader = null;
+        PlayButton.Content = "Play";
     }
 
     private async void OnTranscribeClicked(object sender, RoutedEventArgs e)
@@ -193,18 +261,29 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        StopPlayback();
+        
         if (_recorder.IsRecording)
         {
-            e.Cancel = true;
-            AppendLog("Stopping active recording before exit…");
-            await _recorder.StopRecordingAsync();
-            Close();
+            // Force synchronous stop without canceling window close
+            try
+            {
+                _recorder.StopRecordingAsync().Wait(TimeSpan.FromSeconds(2));
+            }
+            catch (Exception ex)
+            {
+                // Log but don't prevent closing
+                System.Diagnostics.Debug.WriteLine($"Error stopping recording on close: {ex.Message}");
+            }
         }
-        else if (_transcriptionCts is not null)
+        
+        if (_transcriptionCts is not null)
         {
             _transcriptionCts.Cancel();
         }
+        
+        _recorder.Dispose();
     }
 }
