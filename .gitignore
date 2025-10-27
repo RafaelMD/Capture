@@ -54,6 +54,6 @@ TestResult.xml
 nunit-*.xml
 
 # Whisper dependencies (PyInstaller executable and data)
-src/CaptureApp/whisper/
+src/CaptureApp/whisper.zip
 *_loopback.wav
 *_microphone.wav

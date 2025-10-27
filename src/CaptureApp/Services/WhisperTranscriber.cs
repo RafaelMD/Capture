@@ -116,7 +116,16 @@ public sealed class WhisperTranscriber
                }))
         {
             var exitCode = await completionSource.Task.ConfigureAwait(false);
-            var transcriptPath = outputPrefix + ".txt";
+            
+            // Whisper creates files based on the input audio filename, not our outputPrefix
+            var audioFileNameWithoutExt = Path.GetFileNameWithoutExtension(audioFile);
+            var transcriptPath = Path.Combine(outputDirectory, audioFileNameWithoutExt + ".srt");
+            
+            if (!File.Exists(transcriptPath))
+            {
+                transcriptPath = Path.Combine(outputDirectory, audioFileNameWithoutExt + ".txt");
+            }
+            
             return new WhisperResult(transcriptPath, exitCode, outputBuilder.ToString());
         }
     }

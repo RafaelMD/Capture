@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -17,8 +20,6 @@ public partial class MainWindow : Window
     private readonly string _recordingsDirectory;
     private CancellationTokenSource? _transcriptionCts;
     private string? _lastRecordingPath;
-    private IWavePlayer? _waveOutDevice;
-    private AudioFileReader? _audioFileReader;
     private readonly IConfiguration _configuration;
     private readonly string _whisperExecutablePath;
     private readonly string _whisperModel;
@@ -44,76 +45,170 @@ public partial class MainWindow : Window
         }
 
         LanguageComboBox.ItemsSource = WhisperLanguageCatalog.Languages;
-        LanguageComboBox.SelectedItem = WhisperLanguageCatalog.Languages.FirstOrDefault(l => l.Code == "en")
+        LanguageComboBox.SelectedItem = WhisperLanguageCatalog.Languages.FirstOrDefault(l => l.Code == "pt")
                                          ?? WhisperLanguageCatalog.Languages.First();
 
         _recordingsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "CaptureRecordings");
         Directory.CreateDirectory(_recordingsDirectory);
 
-        var defaultTranscripts = Path.Combine(_recordingsDirectory, "Transcripts");
-        WhisperOutputTextBox.Text = defaultTranscripts;
-
         // Log Whisper configuration
         if (File.Exists(_whisperExecutablePath))
         {
-            AppendLog($"Whisper executable: {_whisperExecutablePath}");
-            AppendLog($"Whisper model: {_whisperModel}");
+            // Whisper executable found
         }
         else
         {
-            AppendLog($"WARNING: Whisper executable not found at: {_whisperExecutablePath}");
+            UpdateStatus("WARNING: Whisper executable not found");
         }
 
-        // Log available audio devices on startup
-        AppendLog("Checking available audio devices...");
-        AppendLog(AudioRecorder.GetAvailableDevicesInfo());
-
-        _recorder.Status += (_, message) => Dispatcher.Invoke(() => AppendLog(message));
-        _recorder.RecordingStopped += (_, path) => Dispatcher.Invoke(() =>
+        _recorder.Status += (_, message) => Dispatcher.Invoke(() => {
+            // Status messages are now handled by explicit status updates
+        });
+        _recorder.RecordingStopped += (_, path) => Dispatcher.Invoke(async () =>
         {
             _lastRecordingPath = path;
-            LastRecordingTextBlock.Text = path;
-            UpdateStatus("Recording stopped.");
+            UpdateStatus("Recording stopped");
+            
+            // Reset button to Start state
             RecordButton.IsEnabled = true;
-            StopButton.IsEnabled = false;
-            PlayButton.IsEnabled = File.Exists(path);
-            TranscribeButton.IsEnabled = File.Exists(path);
+            RecordButtonIcon.Text = "▶";
+            RecordButtonIcon.Foreground = System.Windows.Media.Brushes.Green;
+            RecordButtonText.Text = "Start";
+            
+            // Automatically start transcription
+            if (File.Exists(path))
+            {
+                UpdateStatus("Waiting for transcription");
+                await Task.Delay(500); // Small delay for better UX
+                await StartTranscriptionAsync();
+            }
         });
         _recorder.RecordingFailed += (_, ex) => Dispatcher.Invoke(() =>
         {
             UpdateStatus($"Recording failed: {ex.Message}");
-            AppendLog(ex.ToString());
+            
+            // Reset button to Start state
             RecordButton.IsEnabled = true;
-            StopButton.IsEnabled = false;
+            RecordButtonIcon.Text = "▶";
+            RecordButtonIcon.Foreground = System.Windows.Media.Brushes.Green;
+            RecordButtonText.Text = "Start";
         });
-    }
-
-    private void AppendLog(string message)
-    {
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            return;
-        }
-
-        LogTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
-        LogTextBox.ScrollToEnd();
     }
 
     private void UpdateStatus(string message)
     {
         StatusTextBlock.Text = message;
-        AppendLog(message);
     }
 
-    private void OnRecordClicked(object sender, RoutedEventArgs e)
+    private void SaveRecordingMetadata(string transcriptPath)
+    {
+        if (_lastRecordingPath is null)
+            return;
+
+        // Read transcription content
+        var transcription = string.Empty;
+        if (File.Exists(transcriptPath))
+        {
+            transcription = File.ReadAllText(transcriptPath);
+        }
+
+        // Parse tags from hashtags
+        var tagsText = string.Empty;
+        Dispatcher.Invoke(() => tagsText = TagsTextBox.Text);
+        var tags = ParseHashtags(tagsText);
+
+        // Get meeting name
+        var meetingName = string.Empty;
+        Dispatcher.Invoke(() => meetingName = MeetingNameTextBox.Text);
+
+        // Create metadata object
+        var metadata = new RecordingMetadata
+        {
+            Name = string.IsNullOrWhiteSpace(meetingName) ? "Untitled Meeting" : meetingName,
+            Transcription = transcription,
+            DateTime = DateTime.Now,
+            Tags = tags
+        };
+
+        // Save to JSON file (same name as transcript but .json extension)
+        var jsonPath = Path.ChangeExtension(transcriptPath, ".json");
+        var jsonOptions = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
+        
+        var jsonContent = JsonSerializer.Serialize(metadata, jsonOptions);
+        File.WriteAllText(jsonPath, jsonContent);
+
+        // Sync with Jaboo
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var apiUrl = _configuration["Jaboo:ApiUrl"];
+                var apiKey = _configuration["Jaboo:ApiKey"];
+
+                if (!string.IsNullOrWhiteSpace(apiUrl) && !string.IsNullOrWhiteSpace(apiKey))
+                {
+                    Dispatcher.Invoke(() => UpdateStatus("Syncing with Jaboo..."));
+                    
+                    using var jabooSync = new JabooSyncService();
+                    var success = await jabooSync.SyncAsync(apiUrl, apiKey, metadata);
+                    
+                    Dispatcher.Invoke(() =>
+                    {
+                        if (success)
+                        {
+                            UpdateStatus("Sync completed successfully");
+                        }
+                        else
+                        {
+                            UpdateStatus("Sync failed - check API settings");
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.Invoke(() => UpdateStatus($"Sync error: {ex.Message}"));
+            }
+        });
+    }
+
+    private static List<string> ParseHashtags(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return new List<string>();
+
+        // Match hashtags: # followed by word characters
+        var matches = Regex.Matches(text, @"#(\w+)");
+        return matches.Select(m => m.Groups[1].Value).Distinct().ToList();
+    }
+
+    private void OnSettingsClicked(object sender, RoutedEventArgs e)
+    {
+        var settingsWindow = new SettingsWindow(_configuration, _lastRecordingPath)
+        {
+            Owner = this
+        };
+        settingsWindow.ShowDialog();
+    }
+
+    private async void OnRecordClicked(object sender, RoutedEventArgs e)
     {
         try
         {
+            // If currently recording, stop it
             if (_recorder.IsRecording)
             {
+                UpdateStatus("Stopping recording...");
+                RecordButton.IsEnabled = false;
+                await _recorder.StopRecordingAsync();
                 return;
             }
 
+            // Start recording
             var language = (LanguageOption?)LanguageComboBox.SelectedItem ?? WhisperLanguageCatalog.Languages.First();
             Directory.CreateDirectory(_recordingsDirectory);
             var fileName = $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.wav";
@@ -121,101 +216,27 @@ public partial class MainWindow : Window
 
             _recorder.StartRecording(fullPath);
             _lastRecordingPath = fullPath;
-            LastRecordingTextBlock.Text = fullPath;
 
-            RecordButton.IsEnabled = false;
-            StopButton.IsEnabled = true;
-            TranscribeButton.IsEnabled = false;
-            UpdateStatus($"Recording… ({language.DisplayName})");
+            // Change button to Stop state
+            RecordButtonIcon.Text = "⏹";
+            RecordButtonIcon.Foreground = System.Windows.Media.Brushes.Red;
+            RecordButtonText.Text = "Stop";
+            
+            UpdateStatus($"Recording...");
         }
         catch (Exception ex)
         {
             UpdateStatus($"Failed to start recording: {ex.Message}");
-            AppendLog(ex.ToString());
+            
+            // Reset button to Start state
             RecordButton.IsEnabled = true;
-            StopButton.IsEnabled = false;
+            RecordButtonIcon.Text = "▶";
+            RecordButtonIcon.Foreground = System.Windows.Media.Brushes.Green;
+            RecordButtonText.Text = "Start";
         }
     }
 
-    private async void OnStopClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            UpdateStatus("Stopping recording...");
-            AppendLog("Stop button clicked.");
-            StopButton.IsEnabled = false;
-            await _recorder.StopRecordingAsync();
-            AppendLog("Stop recording completed.");
-        }
-        catch (Exception ex)
-        {
-            Dispatcher.Invoke(() =>
-            {
-                UpdateStatus($"Failed to stop recording: {ex.Message}");
-                AppendLog(ex.ToString());
-                RecordButton.IsEnabled = true;
-                StopButton.IsEnabled = false;
-            });
-        }
-    }
-
-    private void OnPlayClicked(object sender, RoutedEventArgs e)
-    {
-        // Toggle playback
-        if (_waveOutDevice?.PlaybackState == PlaybackState.Playing)
-        {
-            StopPlayback();
-            UpdateStatus("Playback stopped.");
-            return;
-        }
-
-        if (_lastRecordingPath is null || !File.Exists(_lastRecordingPath))
-        {
-            UpdateStatus("No recording available to play.");
-            return;
-        }
-
-        try
-        {
-            // Stop any existing playback
-            StopPlayback();
-
-            _audioFileReader = new AudioFileReader(_lastRecordingPath);
-            _waveOutDevice = new WaveOutEvent();
-            _waveOutDevice.Init(_audioFileReader);
-            _waveOutDevice.PlaybackStopped += (s, args) =>
-            {
-                Dispatcher.Invoke(() =>
-                {
-                    UpdateStatus("Playback finished.");
-                    PlayButton.Content = "Play";
-                    StopPlayback();
-                });
-            };
-
-            _waveOutDevice.Play();
-            PlayButton.Content = "Stop";
-            UpdateStatus($"Playing: {Path.GetFileName(_lastRecordingPath)}");
-        }
-        catch (Exception ex)
-        {
-            UpdateStatus($"Failed to play recording: {ex.Message}");
-            AppendLog(ex.ToString());
-            StopPlayback();
-        }
-    }
-
-    private void StopPlayback()
-    {
-        _waveOutDevice?.Stop();
-        _waveOutDevice?.Dispose();
-        _waveOutDevice = null;
-        _audioFileReader?.Dispose();
-        _audioFileReader = null;
-        PlayButton.Content = "Play";
-    }
-
-    private async void OnTranscribeClicked(object sender, RoutedEventArgs e)
+    private async Task StartTranscriptionAsync()
     {
         if (_lastRecordingPath is null || !File.Exists(_lastRecordingPath))
         {
@@ -223,22 +244,21 @@ public partial class MainWindow : Window
             return;
         }
 
-        var outputDirectory = WhisperOutputTextBox.Text;
-        var extraArgs = WhisperArgsTextBox.Text;
+        // Read settings from configuration
+        var outputDirectory = _configuration["Whisper:OutputFolder"];
+        var extraArgs = _configuration["Whisper:ExtraArguments"];
         var language = (LanguageOption?)LanguageComboBox.SelectedItem ?? WhisperLanguageCatalog.Languages.First();
 
         if (!File.Exists(_whisperExecutablePath))
         {
             UpdateStatus($"Whisper executable not found: {_whisperExecutablePath}");
-            AppendLog("Please check the ExecutablePath in appsettings.json");
             return;
         }
 
         try
         {
-            TranscribeButton.IsEnabled = false;
             RecordButton.IsEnabled = false;
-            UpdateStatus("Starting transcription…");
+            UpdateStatus("Transcribing...");
 
             _transcriptionCts = new CancellationTokenSource();
             var options = new WhisperOptions
@@ -252,19 +272,36 @@ public partial class MainWindow : Window
             };
 
             var transcriber = new WhisperTranscriber(options);
-            var progress = new Progress<string>(line => Dispatcher.Invoke(() => AppendLog(line)));
+            var progress = new Progress<string>(line => { /* Progress updates removed */ });
             var result = await transcriber.TranscribeAsync(_lastRecordingPath, language.Code, progress, _transcriptionCts.Token)
                                           .ConfigureAwait(false);
 
             Dispatcher.Invoke(() =>
             {
-                if (result.ExitCode == 0 && File.Exists(result.TranscriptPath))
+                if (result.ExitCode == 0)
                 {
-                    UpdateStatus($"Transcription complete: {result.TranscriptPath}");
+                    if (File.Exists(result.TranscriptPath))
+                    {
+                        UpdateStatus($"Transcription completed");
+                        
+                        // Save metadata JSON
+                        try
+                        {
+                            SaveRecordingMetadata(result.TranscriptPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"Failed to save metadata: {ex.Message}");
+                        }
+                    }
+                    else
+                    {
+                        UpdateStatus($"Transcription completed but file not found: {result.TranscriptPath}");
+                    }
                 }
                 else
                 {
-                    UpdateStatus($"Transcription finished with exit code {result.ExitCode}. See logs for details.");
+                    UpdateStatus($"Transcription failed (exit code {result.ExitCode})");
                 }
 
                 RecordButton.IsEnabled = true;
@@ -272,20 +309,18 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
-            Dispatcher.Invoke(() => UpdateStatus("Transcription cancelled."));
+            Dispatcher.Invoke(() => UpdateStatus("Transcription cancelled"));
         }
         catch (Exception ex)
         {
             Dispatcher.Invoke(() =>
             {
                 UpdateStatus($"Transcription failed: {ex.Message}");
-                AppendLog(ex.ToString());
                 RecordButton.IsEnabled = true;
             });
         }
         finally
         {
-            Dispatcher.Invoke(() => TranscribeButton.IsEnabled = true);
             _transcriptionCts?.Dispose();
             _transcriptionCts = null;
         }
@@ -293,8 +328,6 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        StopPlayback();
-        
         if (_recorder.IsRecording)
         {
             // Force synchronous stop without canceling window close
