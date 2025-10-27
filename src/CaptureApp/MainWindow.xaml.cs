@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private readonly IConfiguration _configuration;
     private readonly string _whisperExecutablePath;
     private readonly string _whisperModel;
+    private readonly RecordingHistoryService _historyService;
 
     public MainWindow()
     {
@@ -50,6 +51,10 @@ public partial class MainWindow : Window
 
         _recordingsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "CaptureRecordings");
         Directory.CreateDirectory(_recordingsDirectory);
+
+        // Initialize history service
+        _historyService = new RecordingHistoryService(_recordingsDirectory);
+        LoadHistory();
 
         // Log Whisper configuration
         if (File.Exists(_whisperExecutablePath))
@@ -176,6 +181,55 @@ public partial class MainWindow : Window
         });
     }
 
+    private void LoadHistory()
+    {
+        try
+        {
+            var history = _historyService.LoadHistory();
+            HistoryListBox.ItemsSource = history;
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Failed to load history: {ex.Message}");
+        }
+    }
+
+    private void OnHistorySelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (HistoryListBox.SelectedItem is RecordingHistoryItem item)
+        {
+            // Open transcription view window
+            try
+            {
+                var transcriptionWindow = new TranscriptionViewWindow(item)
+                {
+                    Owner = this
+                };
+                transcriptionWindow.ShowDialog();
+                
+                // Clear selection after closing the window
+                HistoryListBox.SelectedItem = null;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to open transcription: {ex.Message}", "Error", 
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+
+    private void OnNewRecordingClicked(object sender, RoutedEventArgs e)
+    {
+        // Clear any selection in history
+        HistoryListBox.SelectedItem = null;
+        
+        // Focus on the meeting name textbox for user convenience
+        MeetingNameTextBox.Focus();
+        
+        // Optionally scroll to top of the page
+        UpdateStatus("Ready to start new recording");
+    }
+
     private static List<string> ParseHashtags(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -288,6 +342,9 @@ public partial class MainWindow : Window
                         try
                         {
                             SaveRecordingMetadata(result.TranscriptPath);
+                            
+                            // Refresh history after successful transcription
+                            LoadHistory();
                         }
                         catch (Exception ex)
                         {
