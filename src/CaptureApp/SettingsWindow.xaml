@@ -18,6 +18,7 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="140" />
@@ -36,8 +37,13 @@
                 <TextBox x:Name="OutputFolderTextBox" Grid.Row="2" Grid.Column="1" Margin="0 0 0 12"
                          ToolTip="Folder where transcripts will be saved" />
 
-                <TextBlock Text="Extra Arguments" Grid.Row="3" Grid.Column="0" Margin="0 0 12 0" VerticalAlignment="Center" />
-                <TextBox x:Name="ExtraArgsTextBox" Grid.Row="3" Grid.Column="1" Margin="0"
+                <TextBlock Text="Language" Grid.Row="3" Grid.Column="0" Margin="0 0 12 12" VerticalAlignment="Center" />
+                <ComboBox x:Name="LanguageComboBox" Grid.Row="3" Grid.Column="1" Margin="0 0 0 12"
+                          DisplayMemberPath="DisplayName" SelectedValuePath="Code"
+                          ToolTip="Default language for transcription" />
+
+                <TextBlock Text="Extra Arguments" Grid.Row="4" Grid.Column="0" Margin="0 0 12 0" VerticalAlignment="Center" />
+                <TextBox x:Name="ExtraArgsTextBox" Grid.Row="4" Grid.Column="1" Margin="0"
                          ToolTip="Additional command-line arguments for Whisper" />
             </Grid>
         </GroupBox>

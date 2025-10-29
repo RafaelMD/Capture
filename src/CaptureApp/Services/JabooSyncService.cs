@@ -10,6 +10,8 @@ namespace CaptureApp.Services;
 public class JabooSyncService : IDisposable
 {
     private readonly HttpClient _httpClient;
+    public string? LastError { get; private set; }
+    public string? LastRequestBody { get; private set; }
 
     public JabooSyncService()
     {
@@ -30,25 +32,40 @@ public class JabooSyncService : IDisposable
 
         try
         {
+            // Serialize metadata with proper JSON options
+            var jsonOptions = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+            };
+            
+            var jsonBody = JsonSerializer.Serialize(metadata, jsonOptions);
+            LastRequestBody = jsonBody;
+            
+            // Debug output
+            System.Diagnostics.Debug.WriteLine($"Jaboo Sync Request Body:\n{jsonBody}");
+            
             // Prepare the request
             var request = new HttpRequestMessage(HttpMethod.Post, apiUrl);
             request.Headers.Add("x-api-key", apiKey);
-            request.Content = new StringContent(
-                JsonSerializer.Serialize(metadata, new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-                }),
-                Encoding.UTF8,
-                "application/json"
-            );
+            request.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
 
             // Send the request
             var response = await _httpClient.SendAsync(request);
             
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                LastError = $"HTTP {(int)response.StatusCode}: {errorContent}";
+                System.Diagnostics.Debug.WriteLine($"Jaboo Sync Failed: {LastError}");
+            }
+            
             return response.IsSuccessStatusCode;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            LastError = ex.Message;
+            System.Diagnostics.Debug.WriteLine($"Jaboo Sync Exception: {ex}");
             return false;
         }
     }

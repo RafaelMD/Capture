@@ -20,34 +20,25 @@ public partial class MainWindow : Window
     private readonly string _recordingsDirectory;
     private CancellationTokenSource? _transcriptionCts;
     private string? _lastRecordingPath;
-    private readonly IConfiguration _configuration;
-    private readonly string _whisperExecutablePath;
-    private readonly string _whisperModel;
+    private IConfiguration _configuration = null!;
+    private string _whisperExecutablePath = null!;
+    private string _whisperModel = null!;
     private readonly RecordingHistoryService _historyService;
+    private readonly ProcessingService _processingService = new();
+    private ProcessingItem? _currentProcessingItem;
 
     public MainWindow()
     {
         InitializeComponent();
 
         // Load configuration
-        _configuration = new ConfigurationBuilder()
-            .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
-            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-            .Build();
-
-        // Read Whisper settings from configuration
-        _whisperExecutablePath = _configuration["Whisper:ExecutablePath"] ?? "whisper/faster-whisper-xxl.exe";
-        _whisperModel = _configuration["Whisper:Model"] ?? "medium";
+        LoadConfiguration();
 
         // Resolve relative path to absolute
         if (!Path.IsPathRooted(_whisperExecutablePath))
         {
             _whisperExecutablePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, _whisperExecutablePath);
         }
-
-        LanguageComboBox.ItemsSource = WhisperLanguageCatalog.Languages;
-        LanguageComboBox.SelectedItem = WhisperLanguageCatalog.Languages.FirstOrDefault(l => l.Code == "pt")
-                                         ?? WhisperLanguageCatalog.Languages.First();
 
         _recordingsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "CaptureRecordings");
         Directory.CreateDirectory(_recordingsDirectory);
@@ -56,10 +47,16 @@ public partial class MainWindow : Window
         _historyService = new RecordingHistoryService(_recordingsDirectory);
         LoadHistory();
 
+        // Initialize processing list
+        ProcessingListBox.ItemsSource = _processingService.ProcessingQueue;
+
+        // Initialize status bar
+        UpdateStatusBar();
+
         // Log Whisper configuration
         if (File.Exists(_whisperExecutablePath))
         {
-            // Whisper executable found
+            UpdateStatus("Ready");
         }
         else
         {
@@ -69,23 +66,35 @@ public partial class MainWindow : Window
         _recorder.Status += (_, message) => Dispatcher.Invoke(() => {
             // Status messages are now handled by explicit status updates
         });
-        _recorder.RecordingStopped += (_, path) => Dispatcher.Invoke(async () =>
+        _recorder.RecordingStopped += (_, path) => Dispatcher.Invoke(() =>
         {
             _lastRecordingPath = path;
-            UpdateStatus("Recording stopped");
             
-            // Reset button to Start state
+            // Capture values before clearing
+            var meetingName = string.IsNullOrWhiteSpace(MeetingNameTextBox.Text) 
+                ? $"Recording {DateTime.Now:yyyy-MM-dd HH:mm}" 
+                : MeetingNameTextBox.Text;
+            var tags = TagsTextBox.Text;
+            var notes = NotesTextBox.Text;
+            var language = GetConfiguredLanguage();
+            
+            // Immediately unlock UI for new recording
             RecordButton.IsEnabled = true;
             RecordButtonIcon.Text = "▶";
             RecordButtonIcon.Foreground = System.Windows.Media.Brushes.Green;
             RecordButtonText.Text = "Start";
+            UpdateStatus("Ready for new recording");
             
-            // Automatically start transcription
+            // Clear the fields for next recording
+            MeetingNameTextBox.Clear();
+            TagsTextBox.Clear();
+            NotesTextBox.Clear();
+            
+            // Start transcription in background (non-blocking)
             if (File.Exists(path))
             {
-                UpdateStatus("Waiting for transcription");
-                await Task.Delay(500); // Small delay for better UX
-                await StartTranscriptionAsync();
+                // Fire and forget - transcription happens in background
+                _ = StartTranscriptionAsync(meetingName, tags, notes, language);
             }
         });
         _recorder.RecordingFailed += (_, ex) => Dispatcher.Invoke(() =>
@@ -100,12 +109,73 @@ public partial class MainWindow : Window
         });
     }
 
+    private void LoadConfiguration()
+    {
+        _configuration = new ConfigurationBuilder()
+            .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+            .Build();
+
+        // Read Whisper settings from configuration
+        _whisperExecutablePath = _configuration["Whisper:ExecutablePath"] ?? "whisper/faster-whisper-xxl.exe";
+        _whisperModel = _configuration["Whisper:Model"] ?? "medium";
+        
+        // Update status bar if already initialized
+        UpdateStatusBar();
+    }
+
+    private LanguageOption GetConfiguredLanguage()
+    {
+        var languageCode = _configuration["Whisper:Language"] ?? "pt";
+        return WhisperLanguageCatalog.Languages.FirstOrDefault(l => l.Code == languageCode)
+               ?? WhisperLanguageCatalog.Languages.First();
+    }
+
+    private void UpdateStatusBar()
+    {
+        if (LanguageStatusText != null)
+        {
+            var language = GetConfiguredLanguage();
+            LanguageStatusText.Text = language.DisplayName;
+        }
+
+        if (MicrophoneStatusText != null)
+        {
+            // Get default recording device
+            try
+            {
+                var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+                var device = enumerator.GetDefaultAudioEndpoint(NAudio.CoreAudioApi.DataFlow.Capture, NAudio.CoreAudioApi.Role.Multimedia);
+                MicrophoneStatusText.Text = device?.FriendlyName ?? "Default Device";
+            }
+            catch
+            {
+                MicrophoneStatusText.Text = "Default Device";
+            }
+        }
+
+        if (AudioOutputStatusText != null)
+        {
+            // Get default playback device
+            try
+            {
+                var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+                var device = enumerator.GetDefaultAudioEndpoint(NAudio.CoreAudioApi.DataFlow.Render, NAudio.CoreAudioApi.Role.Multimedia);
+                AudioOutputStatusText.Text = device?.FriendlyName ?? "Default Device";
+            }
+            catch
+            {
+                AudioOutputStatusText.Text = "Default Device";
+            }
+        }
+    }
+
     private void UpdateStatus(string message)
     {
         StatusTextBlock.Text = message;
     }
 
-    private void SaveRecordingMetadata(string transcriptPath)
+    private void SaveRecordingMetadata(string transcriptPath, string meetingName, string tagsText, string notes, ProcessingItem? processingItem = null)
     {
         if (_lastRecordingPath is null)
             return;
@@ -118,13 +188,7 @@ public partial class MainWindow : Window
         }
 
         // Parse tags from hashtags
-        var tagsText = string.Empty;
-        Dispatcher.Invoke(() => tagsText = TagsTextBox.Text);
         var tags = ParseHashtags(tagsText);
-
-        // Get meeting name
-        var meetingName = string.Empty;
-        Dispatcher.Invoke(() => meetingName = MeetingNameTextBox.Text);
 
         // Create metadata object
         var metadata = new RecordingMetadata
@@ -132,7 +196,8 @@ public partial class MainWindow : Window
             Name = string.IsNullOrWhiteSpace(meetingName) ? "Untitled Meeting" : meetingName,
             Transcription = transcription,
             DateTime = DateTime.Now,
-            Tags = tags
+            Tags = tags,
+            Notes = string.IsNullOrWhiteSpace(notes) ? null : notes
         };
 
         // Save to JSON file (same name as transcript but .json extension)
@@ -156,7 +221,7 @@ public partial class MainWindow : Window
 
                 if (!string.IsNullOrWhiteSpace(apiUrl) && !string.IsNullOrWhiteSpace(apiKey))
                 {
-                    Dispatcher.Invoke(() => UpdateStatus("Syncing with Jaboo..."));
+                    Dispatcher.Invoke(() => processingItem?.AddLogMessage("Syncing with Jaboo..."));
                     
                     using var jabooSync = new JabooSyncService();
                     var success = await jabooSync.SyncAsync(apiUrl, apiKey, metadata);
@@ -165,18 +230,31 @@ public partial class MainWindow : Window
                     {
                         if (success)
                         {
-                            UpdateStatus("Sync completed successfully");
+                            processingItem?.AddLogMessage("Sync completed successfully");
                         }
                         else
                         {
-                            UpdateStatus("Sync failed - check API settings");
+                            var errorMsg = !string.IsNullOrWhiteSpace(jabooSync.LastError) 
+                                ? $"Sync failed: {jabooSync.LastError}" 
+                                : "Sync failed - check API settings";
+                            processingItem?.AddLogMessage(errorMsg);
+                            
+                            // Log request body for debugging
+                            if (!string.IsNullOrWhiteSpace(jabooSync.LastRequestBody))
+                            {
+                                processingItem?.AddLogMessage($"Request body: {jabooSync.LastRequestBody}");
+                            }
                         }
                     });
+                }
+                else
+                {
+                    Dispatcher.Invoke(() => processingItem?.AddLogMessage("Jaboo API URL or Key not configured"));
                 }
             }
             catch (Exception ex)
             {
-                Dispatcher.Invoke(() => UpdateStatus($"Sync error: {ex.Message}"));
+                Dispatcher.Invoke(() => processingItem?.AddLogMessage($"Sync error: {ex.Message}"));
             }
         });
     }
@@ -190,7 +268,8 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            UpdateStatus($"Failed to load history: {ex.Message}");
+            // Log error but don't update main status - it's a background operation
+            System.Diagnostics.Debug.WriteLine($"Failed to load history: {ex.Message}");
         }
     }
 
@@ -218,16 +297,37 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OnProcessingSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (ProcessingListBox.SelectedItem is ProcessingItem item)
+        {
+            // Open processing log window
+            try
+            {
+                var logWindow = new ProcessingLogWindow(item)
+                {
+                    Owner = this
+                };
+                logWindow.Show(); // Use Show instead of ShowDialog so user can continue working
+                
+                // Clear selection
+                ProcessingListBox.SelectedItem = null;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to open processing log: {ex.Message}", "Error", 
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+
     private void OnNewRecordingClicked(object sender, RoutedEventArgs e)
     {
-        // Clear any selection in history
+        // Clear selection
         HistoryListBox.SelectedItem = null;
         
         // Focus on the meeting name textbox for user convenience
         MeetingNameTextBox.Focus();
-        
-        // Optionally scroll to top of the page
-        UpdateStatus("Ready to start new recording");
     }
 
     private static List<string> ParseHashtags(string text)
@@ -242,7 +342,11 @@ public partial class MainWindow : Window
 
     private void OnSettingsClicked(object sender, RoutedEventArgs e)
     {
-        var settingsWindow = new SettingsWindow(_configuration, _lastRecordingPath)
+        var settingsWindow = new SettingsWindow(_configuration, _lastRecordingPath, () =>
+        {
+            // Reload configuration when settings are saved
+            LoadConfiguration();
+        })
         {
             Owner = this
         };
@@ -262,8 +366,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            // Start recording
-            var language = (LanguageOption?)LanguageComboBox.SelectedItem ?? WhisperLanguageCatalog.Languages.First();
+            // Start recording (language is captured when recording stops)
             Directory.CreateDirectory(_recordingsDirectory);
             var fileName = $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.wav";
             var fullPath = Path.Combine(_recordingsDirectory, fileName);
@@ -290,30 +393,42 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task StartTranscriptionAsync()
+    private async Task StartTranscriptionAsync(string meetingName, string tags, string notes, LanguageOption language)
     {
         if (_lastRecordingPath is null || !File.Exists(_lastRecordingPath))
         {
-            UpdateStatus("No recording available to transcribe.");
+            // Don't update main status - just log to processing item
             return;
         }
 
         // Read settings from configuration
         var outputDirectory = _configuration["Whisper:OutputFolder"];
         var extraArgs = _configuration["Whisper:ExtraArguments"];
-        var language = (LanguageOption?)LanguageComboBox.SelectedItem ?? WhisperLanguageCatalog.Languages.First();
 
         if (!File.Exists(_whisperExecutablePath))
         {
-            UpdateStatus($"Whisper executable not found: {_whisperExecutablePath}");
+            // Don't update main status - log error in debug
+            System.Diagnostics.Debug.WriteLine($"Whisper executable not found: {_whisperExecutablePath}");
             return;
         }
 
+        // Add to processing queue
+        ProcessingItem? processingItem = null;
+        Dispatcher.Invoke(() => 
+        {
+            processingItem = _processingService.AddToQueue(meetingName, _lastRecordingPath);
+            _currentProcessingItem = processingItem; // Keep reference for removal
+            processingItem.AddLogMessage("Starting transcription...");
+            processingItem.AddLogMessage($"Audio file: {Path.GetFileName(_lastRecordingPath)}");
+            processingItem.AddLogMessage($"Language: {language.DisplayName}");
+            if (!string.IsNullOrWhiteSpace(tags))
+            {
+                processingItem.AddLogMessage($"Tags: {tags}");
+            }
+        });
+
         try
         {
-            RecordButton.IsEnabled = false;
-            UpdateStatus("Transcribing...");
-
             _transcriptionCts = new CancellationTokenSource();
             var options = new WhisperOptions
             {
@@ -325,8 +440,17 @@ public partial class MainWindow : Window
                 AdditionalArguments = string.IsNullOrWhiteSpace(extraArgs) ? null : extraArgs
             };
 
+            Dispatcher.Invoke(() => 
+            {
+                processingItem?.AddLogMessage($"Using model: {_whisperModel}");
+                processingItem?.AddLogMessage("Transcribing audio...");
+            });
+
             var transcriber = new WhisperTranscriber(options);
-            var progress = new Progress<string>(line => { /* Progress updates removed */ });
+            var progress = new Progress<string>(line => 
+            {
+                Dispatcher.Invoke(() => processingItem?.AddLogMessage(line));
+            });
             var result = await transcriber.TranscribeAsync(_lastRecordingPath, language.Code, progress, _transcriptionCts.Token)
                                           .ConfigureAwait(false);
 
@@ -336,44 +460,77 @@ public partial class MainWindow : Window
                 {
                     if (File.Exists(result.TranscriptPath))
                     {
-                        UpdateStatus($"Transcription completed");
+                        processingItem?.AddLogMessage("Transcription completed successfully");
+                        processingItem?.AddLogMessage($"Output file: {Path.GetFileName(result.TranscriptPath)}");
                         
                         // Save metadata JSON
                         try
                         {
-                            SaveRecordingMetadata(result.TranscriptPath);
+                            SaveRecordingMetadata(result.TranscriptPath, meetingName, tags, notes, processingItem);
+                            processingItem?.AddLogMessage("Metadata saved");
+                            
+                            // Update status
+                            if (processingItem != null)
+                            {
+                                processingItem.Status = "Completed";
+                            }
                             
                             // Refresh history after successful transcription
                             LoadHistory();
+                            
+                            // Remove from processing queue after a short delay
+                            Task.Delay(2000).ContinueWith(_ => Dispatcher.Invoke(() =>
+                            {
+                                if (_currentProcessingItem != null)
+                                {
+                                    _processingService.RemoveFromQueue(_currentProcessingItem);
+                                }
+                            }));
                         }
                         catch (Exception ex)
                         {
+                            processingItem?.AddLogMessage($"Error saving metadata: {ex.Message}");
                             System.Diagnostics.Debug.WriteLine($"Failed to save metadata: {ex.Message}");
                         }
                     }
                     else
                     {
-                        UpdateStatus($"Transcription completed but file not found: {result.TranscriptPath}");
+                        processingItem?.AddLogMessage($"Error: Transcript file not found");
+                        // Don't update main status - it might be recording
                     }
                 }
                 else
                 {
-                    UpdateStatus($"Transcription failed (exit code {result.ExitCode})");
+                    processingItem?.AddLogMessage($"Transcription failed with exit code {result.ExitCode}");
+                    // Don't update main status - it might be recording
+                    
+                    if (processingItem != null)
+                    {
+                        processingItem.Status = "Failed";
+                    }
                 }
-
-                RecordButton.IsEnabled = true;
             });
         }
         catch (OperationCanceledException)
         {
-            Dispatcher.Invoke(() => UpdateStatus("Transcription cancelled"));
+            Dispatcher.Invoke(() => 
+            {
+                processingItem?.AddLogMessage("Transcription cancelled");
+                if (processingItem != null)
+                {
+                    processingItem.Status = "Cancelled";
+                }
+            });
         }
         catch (Exception ex)
         {
             Dispatcher.Invoke(() =>
             {
-                UpdateStatus($"Transcription failed: {ex.Message}");
-                RecordButton.IsEnabled = true;
+                processingItem?.AddLogMessage($"Error: {ex.Message}");
+                if (processingItem != null)
+                {
+                    processingItem.Status = "Failed";
+                }
             });
         }
         finally

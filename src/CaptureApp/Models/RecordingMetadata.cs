@@ -9,4 +9,5 @@ public class RecordingMetadata
     public string Transcription { get; set; } = string.Empty;
     public DateTime DateTime { get; set; }
     public List<string> Tags { get; set; } = new();
+    public string? Notes { get; set; }
 }

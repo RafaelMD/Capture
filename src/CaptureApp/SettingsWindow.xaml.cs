@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Windows;
+using CaptureApp.Models;
 using Microsoft.Extensions.Configuration;
 
 namespace CaptureApp;
@@ -9,15 +11,20 @@ public partial class SettingsWindow : Window
 {
     private readonly IConfiguration _configuration;
     private readonly string _recordingsDirectory;
+    private readonly Action? _onSettingsSaved;
 
-    public SettingsWindow(IConfiguration configuration, string? lastRecordingPath = null)
+    public SettingsWindow(IConfiguration configuration, string? lastRecordingPath = null, Action? onSettingsSaved = null)
     {
         InitializeComponent();
         _configuration = configuration;
+        _onSettingsSaved = onSettingsSaved;
         
         _recordingsDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), 
             "CaptureRecordings");
+
+        // Initialize language dropdown
+        LanguageComboBox.ItemsSource = WhisperLanguageCatalog.Languages;
 
         LoadSettings();
         
@@ -34,11 +41,17 @@ public partial class SettingsWindow : Window
         var executablePath = _configuration["Whisper:ExecutablePath"] ?? "whisper/faster-whisper-xxl.exe";
         var model = _configuration["Whisper:Model"] ?? "medium";
         var outputFolder = _configuration["Whisper:OutputFolder"] ?? Path.Combine(_recordingsDirectory, "Transcripts");
+        var languageCode = _configuration["Whisper:Language"] ?? "pt";
 
         ExecutablePathTextBox.Text = executablePath;
         ModelTextBox.Text = model;
         OutputFolderTextBox.Text = outputFolder;
         ExtraArgsTextBox.Text = _configuration["Whisper:ExtraArguments"] ?? "";
+        
+        // Set language selection
+        var selectedLanguage = WhisperLanguageCatalog.Languages.FirstOrDefault(l => l.Code == languageCode)
+                               ?? WhisperLanguageCatalog.Languages.First();
+        LanguageComboBox.SelectedItem = selectedLanguage;
         
         // Load Jaboo Integration settings
         ApiUrlTextBox.Text = _configuration["Jaboo:ApiUrl"] ?? "https://izkvewewmtlamozgbqwr.supabase.co/functions/v1/receive-transcription";
@@ -70,6 +83,10 @@ public partial class SettingsWindow : Window
                 ? null 
                 : ExtraArgsTextBox.Text;
             
+            // Save language selection
+            var selectedLanguage = (LanguageOption?)LanguageComboBox.SelectedItem;
+            settings.Whisper.Language = selectedLanguage?.Code ?? "pt";
+            
             // Update Jaboo Integration settings
             settings.Jaboo ??= new JabooSettings();
             settings.Jaboo.ApiUrl = ApiUrlTextBox.Text;
@@ -85,10 +102,13 @@ public partial class SettingsWindow : Window
             var updatedJson = System.Text.Json.JsonSerializer.Serialize(settings, options);
             File.WriteAllText(appSettingsPath, updatedJson);
             
-            MessageBox.Show("Settings saved successfully! Please restart the application for changes to take effect.", 
+            MessageBox.Show("Settings saved successfully!", 
                           "Settings Saved", 
                           MessageBoxButton.OK, 
                           MessageBoxImage.Information);
+            
+            // Notify MainWindow to reload settings
+            _onSettingsSaved?.Invoke();
             
             DialogResult = true;
             Close();
@@ -121,6 +141,7 @@ public class WhisperSettings
     public string? Model { get; set; }
     public string? OutputFolder { get; set; }
     public string? ExtraArguments { get; set; }
+    public string? Language { get; set; }
 }
 
 public class JabooSettings
